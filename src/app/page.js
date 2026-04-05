@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { io } from 'socket.io-client';
@@ -194,6 +194,9 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
   const [showPartyModal, setShowPartyModal] = useState(false);
   const [socketStatus, setSocketStatus] = useState('disconnected'); // Added socket status tracking
   
+  const [roomIsPlaying, setRoomIsPlaying] = useState(false); // Tracks remote play state
+  const [localPlayerState, setLocalPlayerState] = useState(-10); // Tracks local YT player state
+  
   const currentTrackRef = useRef(null);
   const handleNextAutoplayRef = useRef(null);
   const socketRef = useRef(null); 
@@ -215,7 +218,10 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
     if (!sessionId || !userProfile || !socketRef.current) return;
     
     // Optimistically update our local UI so buttons feel instant
-    if (updates.isPlaying !== undefined) setIsPlaying(updates.isPlaying);
+    if (updates.isPlaying !== undefined) {
+        setIsPlaying(updates.isPlaying);
+        setRoomIsPlaying(updates.isPlaying);
+    }
     if (updates.progress !== undefined) setProgress(updates.progress);
     
     socketRef.current.emit('update-state', {
@@ -262,6 +268,8 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
 
     socket.on('session-update', (data) => {
       const myId = userProfile.id || userProfile.email;
+
+      if (data.isPlaying !== undefined) setRoomIsPlaying(data.isPlaying);
 
       if (data.members) setPartyMembers(data.members);
       if (data.hostId) setHostId(data.hostId);
@@ -336,10 +344,12 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
           onReady: (e) => {
             setPlayer(e.target);
             setIsReady(true);
+            setLocalPlayerState(e.target.getPlayerState());
             e.target.setVolume(100);
             if (currentTrackRef.current) e.target.loadVideoById(currentTrackRef.current.id);
           },
           onStateChange: (e) => {
+            setLocalPlayerState(e.data);
             if (e.data === window.YT.PlayerState.PLAYING) {
               setIsPlaying(true);
               setDuration(e.target.getDuration());
@@ -544,32 +554,60 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
           </div>
         </main>
 
-        {showQueue && (
-          <div className="w-80 bg-[#0a0f1a] border-l border-white/5 flex flex-col z-40 shrink-0 relative shadow-[-10px_0_30px_rgba(0,0,0,0.5)] hidden xl:flex">
-            <div className="p-4 border-b border-white/5 flex items-center justify-between shrink-0">
-              <h3 className="font-bold text-lg text-white">Up Next</h3>
-              <button onClick={() => setShowQueue(false)} className="text-gray-400 hover:text-white transition-colors">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-              {queue.map((track, idx) => (
-                <ListTrackRow 
-                  key={`${track.id}-${idx}`} 
-                  track={track} 
-                  index={idx === queueIndex ? undefined : idx + 1}
-                  isActive={idx === queueIndex}
-                  context={queue} 
-                  onPlay={() => playTrack(track, queue, idx)}
-                  action={
-                    <button onClick={(e) => { e.stopPropagation(); removeFromQueue(idx); }} className="p-2 hover:bg-red-500/20 hover:text-red-400 rounded-full text-gray-500 transition-colors">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  }
-                />
-              ))}
-            </div>
+        {/* Sync Prompt Overlay for Autoplay Blocked on Refresh/Join */}
+        {roomIsPlaying && localPlayerState !== 1 && localPlayerState !== 3 && localPlayerState !== -10 && (
+          <div 
+            className="absolute top-24 left-1/2 -translate-x-1/2 z-[80] bg-blue-600/95 backdrop-blur-md text-white px-6 py-3 rounded-full shadow-[0_10px_40px_rgba(37,99,235,0.5)] flex items-center gap-3 animate-in slide-in-from-top-4 cursor-pointer border border-blue-400 hover:scale-105 transition-transform" 
+            onClick={() => { 
+                if (player) {
+                    player.playVideo();
+                    setLocalPlayerState(3); // Buffering visual state immediately
+                }
+            }}
+          >
+              <div className="relative flex h-3 w-3 mr-1">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-white"></span>
+              </div>
+              <span className="font-bold text-sm tracking-wide">Tap to Sync Audio</span>
           </div>
+        )}
+
+        {showQueue && (
+          <>
+            {/* Mobile Backdrop */}
+            <div 
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[90] xl:hidden transition-opacity" 
+              onClick={() => setShowQueue(false)} 
+            />
+            
+            {/* Sidebar container */}
+            <div className="fixed inset-y-0 right-0 w-[85%] max-w-[360px] bg-[#0a0f1a] border-l border-white/5 flex flex-col z-[100] xl:static xl:w-80 xl:z-40 shadow-[0_0_50px_rgba(0,0,0,0.8)] xl:shadow-[-10px_0_30px_rgba(0,0,0,0.5)] animate-in slide-in-from-right xl:animate-none duration-300">
+              <div className="p-4 pt-6 md:pt-4 border-b border-white/5 flex items-center justify-between shrink-0 bg-[#0a0f1a] sticky top-0 z-10">
+                <h3 className="font-bold text-lg text-white">Up Next</h3>
+                <button onClick={() => setShowQueue(false)} className="p-2 -mr-2 text-gray-400 hover:text-white transition-colors bg-white/5 rounded-full xl:bg-transparent xl:p-0 xl:mr-0">
+                  <X className="w-5 h-5 xl:w-6 xl:h-6" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-2 pb-24 xl:pb-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+                {queue.map((track, idx) => (
+                  <ListTrackRow 
+                    key={`${track.id}-${idx}`} 
+                    track={track} 
+                    index={idx === queueIndex ? undefined : idx + 1}
+                    isActive={idx === queueIndex}
+                    context={queue} 
+                    onPlay={() => playTrack(track, queue, idx)}
+                    action={
+                      <button onClick={(e) => { e.stopPropagation(); removeFromQueue(idx); }} className="p-2 hover:bg-red-500/20 hover:text-red-400 rounded-full text-gray-500 transition-colors">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+          </>
         )}
       </div>
 
