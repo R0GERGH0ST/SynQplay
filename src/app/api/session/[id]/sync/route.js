@@ -4,77 +4,95 @@ import Session from '@/models/Session';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(request, { params }) {
+// GET: Check if a session exists (used when joining)
+export async function GET(request) {
   await dbConnect();
-  
-  // FIX: In Next.js 15+, params is a Promise and must be awaited
-  const { id } = await params;
 
-  const encoder = new TextEncoder();
+  // PASSIVE CLEANUP: Automatically clears database of stale or abandoned rooms
+  // 1. Destroys sessions completely inactive for 12 hours.
+  // 2. Destroys empty sessions after 2 minutes (allows users to safely refresh the page without killing the room).
+  try {
+    await Session.deleteMany({
+      $or: [
+        { timestamp: { $lt: Date.now() - 12 * 60 * 60 * 1000 } },
+        { members: { $size: 0 }, timestamp: { $lt: Date.now() - 2 * 60 * 1000 } }
+      ]
+    });
+  } catch (e) {
+    console.error("Cleanup error:", e);
+  }
 
-  // Create a Server-Sent Events (SSE) stream for real-time MongoDB updates
-  const stream = new ReadableStream({
-    async start(controller) {
-      let isClosed = false;
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get('id');
 
-      // Listen for client disconnect
-      request.signal.addEventListener('abort', () => {
-        isClosed = true;
-      });
+  if (!id) return NextResponse.json({ error: 'Missing ID' }, { status: 400 });
 
-      const sendData = (data) => {
-        if (!isClosed) {
-          try {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-          } catch (e) {
-            isClosed = true;
-          }
+  const session = await Session.findOne({ sessionId: id });
+  if (!session) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+
+  return NextResponse.json({ success: true, session });
+}
+
+// POST: Create a new party session
+export async function POST(request) {
+  await dbConnect();
+  try {
+    const data = await request.json();
+    const session = await Session.create({
+      ...data,
+      // Use 'system' so the creator's frontend doesn't debounce the initial member load
+      updatedBy: 'system', 
+      timestamp: Date.now()
+    });
+    return NextResponse.json({ success: true, session });
+  } catch (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+// PUT: Update party state (Join, Leave, Play, Pause, Seek, Queue)
+export async function PUT(request) {
+  await dbConnect();
+  try {
+    const { action, sessionId, userId, userProfile, updates } = await request.json();
+    
+    if (action === 'join') {
+      await Session.findOneAndUpdate(
+        { sessionId },
+        { 
+          $addToSet: { members: userProfile },
+          // 'system' prevents the frontend from ignoring this critical metadata update
+          $set: { updatedBy: 'system', timestamp: Date.now() }
         }
-      };
-
-      // Send initial state immediately
-      try {
-        const initialSession = await Session.findOne({ sessionId: id }).lean();
-        if (initialSession) {
-          sendData(initialSession);
-        }
-      } catch (e) {
-        console.error("Initial SSE fetch error:", e);
-      }
-
-      // Poll database rapidly to push updates to the open stream. 
-      const intervalId = setInterval(async () => {
-        if (isClosed) {
-          clearInterval(intervalId);
-          return;
-        }
-        try {
-          const session = await Session.findOne({ sessionId: id }).lean();
-          if (session) {
-            sendData(session);
-          } else {
-            // Keep-alive ping if session is not found
-            if (!isClosed) controller.enqueue(encoder.encode(`: keep-alive\n\n`));
-          }
-        } catch (error) {
-          console.error('SSE Polling Error:', error);
-        }
-      }, 500); // Poll every 500ms
-
-      // Cleanup
-      request.signal.addEventListener('abort', () => {
-        clearInterval(intervalId);
-      });
+      );
+      return NextResponse.json({ success: true });
     }
-  });
 
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      // CRITICAL: Prevents Next.js / Vercel from buffering the SSE stream
-      'Content-Encoding': 'none', 
-    },
-  });
+    if (action === 'leave') {
+      await Session.findOneAndUpdate(
+        { sessionId },
+        { 
+          $pull: { members: { id: userProfile.id } },
+          // 'system' prevents the frontend from ignoring this critical metadata update
+          $set: { updatedBy: 'system', timestamp: Date.now() }
+        }
+      );
+      return NextResponse.json({ success: true });
+    }
+
+    await Session.findOneAndUpdate(
+      { sessionId },
+      { 
+        $set: { 
+          ...updates, 
+          updatedBy: userId, 
+          timestamp: Date.now() 
+        } 
+      }
+    );
+    
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }
