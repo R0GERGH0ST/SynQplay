@@ -25,6 +25,8 @@ export async function POST(request) {
     const data = await request.json();
     const session = await Session.create({
       ...data,
+      // Use 'system' so the creator's frontend doesn't debounce the initial member load
+      updatedBy: 'system', 
       timestamp: Date.now()
     });
     return NextResponse.json({ success: true, session });
@@ -44,7 +46,8 @@ export async function PUT(request) {
         { sessionId },
         { 
           $addToSet: { members: userProfile },
-          $set: { updatedBy: userProfile?.id || userId, timestamp: Date.now() }
+          // 'system' prevents the frontend from ignoring this critical metadata update
+          $set: { updatedBy: 'system', timestamp: Date.now() }
         }
       );
       return NextResponse.json({ success: true });
@@ -55,7 +58,8 @@ export async function PUT(request) {
         { sessionId },
         { 
           $pull: { members: { id: userProfile.id } },
-          $set: { updatedBy: userProfile?.id || userId, timestamp: Date.now() }
+          // 'system' prevents the frontend from ignoring this critical metadata update
+          $set: { updatedBy: 'system', timestamp: Date.now() }
         }
       );
       return NextResponse.json({ success: true });
