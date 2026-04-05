@@ -74,3 +74,5 @@ src/
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new) from the creators of Next.js.
 
 Make sure to add your environment variables in Vercel's dashboard for production deployment.
+
+
