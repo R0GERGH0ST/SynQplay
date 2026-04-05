@@ -1,37 +1,55 @@
+import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
 import Session from '@/models/Session';
 
 export const dynamic = 'force-dynamic';
 
-// GET: Server-Sent Events (SSE) endpoint for real-time streaming
 export async function GET(request, { params }) {
-  // Await the params object (Required for Next.js 15+)
-  const resolvedParams = await params;
-  const { id } = resolvedParams;
-  
   await dbConnect();
+  const { id } = params;
 
+  const encoder = new TextEncoder();
+
+  // Create a Server-Sent Events (SSE) stream for real-time MongoDB updates
   const stream = new ReadableStream({
     async start(controller) {
-      let lastTimestamp = 0;
+      let isClosed = false;
 
-      const interval = setInterval(async () => {
+      // Listen for client disconnect
+      request.signal.addEventListener('abort', () => {
+        isClosed = true;
+      });
+
+      // Send initial state immediately
+      try {
+        const initialSession = await Session.findOne({ sessionId: id }).lean();
+        if (initialSession) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(initialSession)}\n\n`));
+        }
+      } catch (e) {
+        console.error("Initial SSE fetch error:", e);
+      }
+
+      // Poll database rapidly to push updates to the open stream. 
+      // Network delays are handled by the frontend latency math.
+      const intervalId = setInterval(async () => {
+        if (isClosed) {
+          clearInterval(intervalId);
+          return;
+        }
         try {
           const session = await Session.findOne({ sessionId: id }).lean();
-          
-          if (session && session.timestamp > lastTimestamp) {
-            lastTimestamp = session.timestamp;
-            const dataStr = `data: ${JSON.stringify(session)}\n\n`;
-            controller.enqueue(new TextEncoder().encode(dataStr));
+          if (session) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(session)}\n\n`));
           }
         } catch (error) {
-          console.error('SSE Error:', error);
+          console.error('SSE Polling Error:', error);
         }
-      }, 1000);
+      }, 500); // Poll every 500ms for near real-time reaction
 
+      // Cleanup
       request.signal.addEventListener('abort', () => {
-        clearInterval(interval);
-        controller.close();
+        clearInterval(intervalId);
       });
     }
   });
@@ -39,7 +57,7 @@ export async function GET(request, { params }) {
   return new Response(stream, {
     headers: {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': 'no-cache, no-transform',
       'Connection': 'keep-alive',
     },
   });

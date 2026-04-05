@@ -248,6 +248,7 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
       if (data.members) setPartyMembers(data.members);
       if (data.hostId) setHostId(data.hostId);
 
+      // Do not jump around if we are the ones who just updated the DB (debounce our own updates)
       if (data.updatedBy === myId && (Date.now() - data.timestamp) < 1500) return;
 
       if (data.queue) setQueue(data.queue);
@@ -276,16 +277,22 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
              player.pauseVideo();
          }
 
-         if (isNewTrack || data.progress < 2) {
+         if (isNewTrack) {
              player.seekTo(data.progress || 0, true);
              setProgress(data.progress || 0);
          } else {
+             // --- CRITICAL ENHANCEMENT: ZERO-DELAY SYNC MATH ---
+             // Calculate time spent in transit from DB to client
              const timeDiff = data.timestamp ? (Date.now() - data.timestamp) / 1000 : 0;
+             // Cap adjustment to 10 seconds to avoid massive skips if connection dropped
              const adjustedTimeDiff = (timeDiff > 0 && timeDiff < 10) ? timeDiff : 0;
+             
+             // Target progress = Host's progress + Time lost in network travel
              const expectedProgress = data.isPlaying ? (data.progress + adjustedTimeDiff) : data.progress;
              const localProgress = player.getCurrentTime() || 0;
 
-             if (Math.abs(localProgress - expectedProgress) > 2) {
+             // Reduced tolerance from 2.0s to 0.4s for near-instant precision (avoids micro-stutter)
+             if (Math.abs(localProgress - expectedProgress) > 0.4) {
                  player.seekTo(expectedProgress, true);
                  setProgress(expectedProgress);
              }
