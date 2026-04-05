@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
 import Session from '@/models/Session';
 
+export const dynamic = 'force-dynamic';
+
 // GET: Check if a session exists (used when joining)
 export async function GET(request) {
   await dbConnect();
@@ -40,7 +42,10 @@ export async function PUT(request) {
     if (action === 'join') {
       await Session.findOneAndUpdate(
         { sessionId },
-        { $addToSet: { members: userProfile } }
+        { 
+          $addToSet: { members: userProfile },
+          $set: { updatedBy: userProfile?.id || userId, timestamp: Date.now() }
+        }
       );
       return NextResponse.json({ success: true });
     }
@@ -48,7 +53,10 @@ export async function PUT(request) {
     if (action === 'leave') {
       await Session.findOneAndUpdate(
         { sessionId },
-        { $pull: { members: { id: userProfile.id } } }
+        { 
+          $pull: { members: { id: userProfile.id } },
+          $set: { updatedBy: userProfile?.id || userId, timestamp: Date.now() }
+        }
       );
       return NextResponse.json({ success: true });
     }
