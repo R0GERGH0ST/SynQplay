@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 
-echo "Installing yt-dlp locally..."
+echo "Installing yt-dlp via pip..."
 
-mkdir -p bin
+pip install --upgrade yt-dlp
 
-curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-  -o ./bin/yt-dlp
-
-chmod +x ./bin/yt-dlp
-
-echo "yt-dlp installed at ./bin/yt-dlp"
+echo "yt-dlp installed via pip"
