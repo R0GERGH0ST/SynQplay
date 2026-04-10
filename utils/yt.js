@@ -10,44 +10,46 @@ if (!require("fs").existsSync(YT_DLP_PATH)) {
 
 // 🔹 METADATA
 function getMetadata(videoId) {
-    return new Promise((resolve, reject) => {
-        const process = spawn(YT_DLP_PATH, [
-            "-f",
-            "bestaudio",
-            "--no-playlist",
-            "-o",
-            "-",
-            `${YT_URL}${videoId}`,
-        ]);
+  return new Promise((resolve, reject) => {
+    const process = spawn("bash", [
+      YT_DLP_PATH,
+      "--dump-json",
+      "--skip-download",
+      "--no-playlist",
+      `https://www.youtube.com/watch?v=${videoId}`,
+    ]);
 
-        let data = "";
+    let data = "";
 
-        process.stdout.on("data", (chunk) => {
-            data += chunk.toString();
-        });
-
-        process.stderr.on("data", (err) => {
-            console.error("yt-dlp error:", err.toString());
-        });
-
-        process.on("close", (code) => {
-            if (code !== 0) return reject("yt-dlp failed");
-
-            try {
-                const json = JSON.parse(data);
-
-                resolve({
-                    id: videoId,
-                    title: json.title,
-                    duration: json.duration,
-                    thumbnail: json.thumbnail,
-                    uploader: json.uploader,
-                });
-            } catch (err) {
-                reject(err);
-            }
-        });
+    process.stdout.on("data", (chunk) => {
+      data += chunk.toString();
     });
+
+    process.stderr.on("data", (err) => {
+      console.error("yt-dlp error:", err.toString());
+    });
+
+    process.on("close", (code) => {
+      if (code !== 0) {
+        return reject("yt-dlp metadata failed");
+      }
+
+      try {
+        const json = JSON.parse(data);
+
+        resolve({
+          id: videoId,
+          title: json.title,
+          duration: json.duration,
+          thumbnail: json.thumbnail,
+          uploader: json.uploader,
+        });
+      } catch (err) {
+        console.error("JSON parse error:", data);
+        reject("Invalid JSON from yt-dlp");
+      }
+    });
+  });
 }
 
 
