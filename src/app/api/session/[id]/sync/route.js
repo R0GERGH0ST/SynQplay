@@ -1,46 +1,98 @@
+import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
 import Session from '@/models/Session';
 
 export const dynamic = 'force-dynamic';
 
-// GET: Server-Sent Events (SSE) endpoint for real-time streaming
-export async function GET(request, { params }) {
-  // Await the params object (Required for Next.js 15+)
-  const resolvedParams = await params;
-  const { id } = resolvedParams;
-  
+// GET: Check if a session exists (used when joining)
+export async function GET(request) {
   await dbConnect();
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      let lastTimestamp = 0;
+  // PASSIVE CLEANUP: Automatically clears database of stale or abandoned rooms
+  // 1. Destroys sessions completely inactive for 12 hours.
+  // 2. Destroys empty sessions after 2 minutes (allows users to safely refresh the page without killing the room).
+  try {
+    await Session.deleteMany({
+      $or: [
+        { timestamp: { $lt: Date.now() - 12 * 60 * 60 * 1000 } },
+        { members: { $size: 0 }, timestamp: { $lt: Date.now() - 2 * 60 * 1000 } }
+      ]
+    });
+  } catch (e) {
+    console.error("Cleanup error:", e);
+  }
 
-      const interval = setInterval(async () => {
-        try {
-          const session = await Session.findOne({ sessionId: id }).lean();
-          
-          if (session && session.timestamp > lastTimestamp) {
-            lastTimestamp = session.timestamp;
-            const dataStr = `data: ${JSON.stringify(session)}\n\n`;
-            controller.enqueue(new TextEncoder().encode(dataStr));
-          }
-        } catch (error) {
-          console.error('SSE Error:', error);
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get('id');
+
+  if (!id) return NextResponse.json({ error: 'Missing ID' }, { status: 400 });
+
+  const session = await Session.findOne({ sessionId: id });
+  if (!session) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+
+  return NextResponse.json({ success: true, session });
+}
+
+// POST: Create a new party session
+export async function POST(request) {
+  await dbConnect();
+  try {
+    const data = await request.json();
+    const session = await Session.create({
+      ...data,
+      // Use 'system' so the creator's frontend doesn't debounce the initial member load
+      updatedBy: 'system', 
+      timestamp: Date.now()
+    });
+    return NextResponse.json({ success: true, session });
+  } catch (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+// PUT: Update party state (Join, Leave, Play, Pause, Seek, Queue)
+export async function PUT(request) {
+  await dbConnect();
+  try {
+    const { action, sessionId, userId, userProfile, updates } = await request.json();
+    
+    if (action === 'join') {
+      await Session.findOneAndUpdate(
+        { sessionId },
+        { 
+          $addToSet: { members: userProfile },
+          // 'system' prevents the frontend from ignoring this critical metadata update
+          $set: { updatedBy: 'system', timestamp: Date.now() }
         }
-      }, 1000);
-
-      request.signal.addEventListener('abort', () => {
-        clearInterval(interval);
-        controller.close();
-      });
+      );
+      return NextResponse.json({ success: true });
     }
-  });
 
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    },
-  });
+    if (action === 'leave') {
+      await Session.findOneAndUpdate(
+        { sessionId },
+        { 
+          $pull: { members: { id: userProfile.id } },
+          // 'system' prevents the frontend from ignoring this critical metadata update
+          $set: { updatedBy: 'system', timestamp: Date.now() }
+        }
+      );
+      return NextResponse.json({ success: true });
+    }
+
+    await Session.findOneAndUpdate(
+      { sessionId },
+      { 
+        $set: { 
+          ...updates, 
+          updatedBy: userId, 
+          timestamp: Date.now() 
+        } 
+      }
+    );
+    
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }

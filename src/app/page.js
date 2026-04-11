@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { io } from 'socket.io-client';
 import { 
   Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, 
   Search, Home, Compass, Library, Heart, ListMusic, 
@@ -15,6 +16,9 @@ const getClientId = () => {
   }
   return '';
 };
+
+// Use the environment variable for the socket URL, or fallback to relative path if not set
+const SOCKET_URL = typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_SOCKET_URL : '';
 
 const CATEGORIES = ["Podcasts", "Feel good", "Romance", "Relax", "Energize", "Party", "Workout", "Commute", "Sad", "Focus", "Sleep"];
 
@@ -188,9 +192,14 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
   const [partyMembers, setPartyMembers] = useState([]);
   const [hostId, setHostId] = useState(null);
   const [showPartyModal, setShowPartyModal] = useState(false);
+  const [socketStatus, setSocketStatus] = useState('disconnected'); // Added socket status tracking
+  
+  const [roomIsPlaying, setRoomIsPlaying] = useState(false); // Tracks remote play state
+  const [localPlayerState, setLocalPlayerState] = useState(-10); // Tracks local YT player state
   
   const currentTrackRef = useRef(null);
   const handleNextAutoplayRef = useRef(null);
+  const socketRef = useRef(null); 
 
   useEffect(() => {
     const savedSessionId = sessionStorage.getItem('synqplay_session_id');
@@ -204,51 +213,69 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
 
   useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
 
-  const syncStateToMongo = async (updates) => {
-    if (!sessionId || !userProfile) return;
-    try {
-      await fetch('/api/session', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, userId: userProfile.id || userProfile.email, updates })
-      });
-    } catch(e) { console.error("Sync error", e); }
+  // --- WEBSOCKET SYNC EMITTER ---
+  const syncStateToSocket = (updates) => {
+    if (!sessionId || !userProfile || !socketRef.current) return;
+    
+    // Optimistically update our local UI so buttons feel instant
+    if (updates.isPlaying !== undefined) {
+        setIsPlaying(updates.isPlaying);
+        setRoomIsPlaying(updates.isPlaying);
+    }
+    if (updates.progress !== undefined) setProgress(updates.progress);
+    
+    socketRef.current.emit('update-state', {
+      sessionId,
+      userId: userProfile.id || userProfile.email,
+      updates
+    });
   };
 
-  const leaveParty = async () => {
-    if (!sessionId) return;
-    try {
-      await fetch('/api/session', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          action: 'leave', 
-          sessionId, 
-          userProfile: { id: userProfile.id || userProfile.email } 
-        })
+  const leaveParty = () => {
+    if (sessionId && socketRef.current) {
+      socketRef.current.emit('leave-session', { 
+        sessionId, 
+        userId: userProfile.id || userProfile.email 
       });
-    } catch(e) {}
+      socketRef.current.disconnect();
+    }
     setSessionId(null);
   };
 
-  const handleGlobalLogout = async () => {
-    if (sessionId) {
-      await leaveParty();
-    }
+  const handleGlobalLogout = () => {
+    leaveParty();
     onLogout();
   };
 
+  // --- WEBSOCKET CONNECTION & LISTENER ---
   useEffect(() => {
     if (!sessionId || !userProfile) return;
-    const eventSource = new EventSource(`/api/session/${sessionId}/sync`);
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    
+    // CONNECT TO THE DEDICATED SOCKET SERVER URL
+    const socket = io(SOCKET_URL, {
+      transports: ['websocket', 'polling']
+    });
+    
+    socketRef.current = socket;
+    setSocketStatus('connecting');
+
+    // Track Socket.io health state
+    socket.on('connect', () => setSocketStatus('connected'));
+    socket.on('connect_error', () => setSocketStatus('error'));
+    socket.on('disconnect', () => setSocketStatus('disconnected'));
+
+    socket.emit('join-session', { sessionId, userProfile });
+
+    socket.on('session-update', (data) => {
       const myId = userProfile.id || userProfile.email;
+
+      if (data.isPlaying !== undefined) setRoomIsPlaying(data.isPlaying);
 
       if (data.members) setPartyMembers(data.members);
       if (data.hostId) setHostId(data.hostId);
 
-      if (data.updatedBy === myId && (Date.now() - data.timestamp) < 1500) return;
+      // Prevent jumping if we were the ones who sent the update
+      if (data.updatedBy === myId) return;
 
       if (data.queue) setQueue(data.queue);
       if (typeof data.queueIndex === 'number') setQueueIndex(data.queueIndex);
@@ -276,26 +303,29 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
              player.pauseVideo();
          }
 
-         if (isNewTrack || data.progress < 2) {
+         if (isNewTrack) {
              player.seekTo(data.progress || 0, true);
              setProgress(data.progress || 0);
          } else {
              const timeDiff = data.timestamp ? (Date.now() - data.timestamp) / 1000 : 0;
-             const adjustedTimeDiff = (timeDiff > 0 && timeDiff < 10) ? timeDiff : 0;
-             const expectedProgress = data.isPlaying ? (data.progress + adjustedTimeDiff) : data.progress;
+             const expectedProgress = data.isPlaying ? (data.progress + timeDiff) : data.progress;
              const localProgress = player.getCurrentTime() || 0;
 
-             if (Math.abs(localProgress - expectedProgress) > 2) {
+             if (Math.abs(localProgress - expectedProgress) > 0.2) {
                  player.seekTo(expectedProgress, true);
                  setProgress(expectedProgress);
              }
          }
       }
+    });
+
+    return () => {
+      socket.disconnect();
     };
-    eventSource.onerror = () => console.error("SSE connection error");
-    return () => eventSource.close();
   }, [sessionId, player, userProfile]);
 
+  // ... (Rest of the component remains exactly the same)
+  
   useEffect(() => {
     const scriptId = 'yt-iframe-api';
     if (!window.YT && !document.getElementById(scriptId)) {
@@ -314,10 +344,12 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
           onReady: (e) => {
             setPlayer(e.target);
             setIsReady(true);
+            setLocalPlayerState(e.target.getPlayerState());
             e.target.setVolume(100);
             if (currentTrackRef.current) e.target.loadVideoById(currentTrackRef.current.id);
           },
           onStateChange: (e) => {
+            setLocalPlayerState(e.data);
             if (e.data === window.YT.PlayerState.PLAYING) {
               setIsPlaying(true);
               setDuration(e.target.getDuration());
@@ -336,7 +368,7 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
   const handleNextAutoplay = useCallback(() => {
     if (repeat === 2) {
       if (player) { player.seekTo(0); player.playVideo(); }
-      if (sessionId) syncStateToMongo({ progress: 0 });
+      if (sessionId) syncStateToSocket({ progress: 0 });
       return;
     }
     let nextIndex = queueIndex + 1;
@@ -350,7 +382,7 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
       setQueueIndex(nextIndex);
       setCurrentTrack(queue[nextIndex]);
       if (player) player.loadVideoById(queue[nextIndex].id);
-      if (sessionId) syncStateToMongo({ currentTrack: queue[nextIndex], queueIndex: nextIndex, progress: 0, isPlaying: true });
+      if (sessionId) syncStateToSocket({ currentTrack: queue[nextIndex], queueIndex: nextIndex, progress: 0, isPlaying: true });
     }
   }, [queue, queueIndex, shuffle, repeat, player, sessionId]);
 
@@ -406,13 +438,13 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
       setQueue(newQueue);
       setQueueIndex(newQueueIndex !== -1 ? newQueueIndex : 0);
     }
-    if (sessionId) syncStateToMongo({ currentTrack: track, queue: newQueue, queueIndex: newQueueIndex !== -1 ? newQueueIndex : 0, isPlaying: true, progress: 0 });
+    if (sessionId) syncStateToSocket({ currentTrack: track, queue: newQueue, queueIndex: newQueueIndex !== -1 ? newQueueIndex : 0, isPlaying: true, progress: 0 });
   };
 
   const addToQueue = (track) => {
     const newQueue = [...queue, track];
     setQueue(newQueue);
-    if (sessionId) syncStateToMongo({ queue: newQueue });
+    if (sessionId) syncStateToSocket({ queue: newQueue });
   };
 
   const removeFromQueue = (index) => {
@@ -421,7 +453,7 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
     let newQueueIndex = queueIndex;
     if (index < queueIndex) newQueueIndex -= 1;
     setQueueIndex(newQueueIndex);
-    if (sessionId) syncStateToMongo({ queue: newQueue, queueIndex: newQueueIndex });
+    if (sessionId) syncStateToSocket({ queue: newQueue, queueIndex: newQueueIndex });
   };
 
   const playPlaylist = async (playlistId) => {
@@ -447,13 +479,15 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
     const newIsPlaying = !isPlaying;
     if (newIsPlaying) player.playVideo();
     else player.pauseVideo();
-    if (sessionId) syncStateToMongo({ isPlaying: newIsPlaying, progress: player.getCurrentTime() || 0 });
+    
+    // Use the socket emitter instead of fetch
+    if (sessionId) syncStateToSocket({ isPlaying: newIsPlaying, progress: player.getCurrentTime() || 0 });
   };
 
   const handlePrev = () => {
     if (progress > 3) {
       if (player) { player.seekTo(0); player.playVideo(); }
-      if (sessionId) syncStateToMongo({ progress: 0 });
+      if (sessionId) syncStateToSocket({ progress: 0 });
     } else if (queueIndex > 0) {
       const prevIndex = queueIndex - 1;
       setQueueIndex(prevIndex);
@@ -465,7 +499,7 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
     const newTime = parseFloat(e.target.value);
     setProgress(newTime);
     if (player) player.seekTo(newTime, true);
-    if (sessionId) syncStateToMongo({ progress: newTime, isPlaying: true });
+    if (sessionId) syncStateToSocket({ progress: newTime, isPlaying: true });
   };
 
   const handleVolume = (e) => {
@@ -520,32 +554,60 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
           </div>
         </main>
 
-        {showQueue && (
-          <div className="w-80 bg-[#0a0f1a] border-l border-white/5 flex flex-col z-40 shrink-0 relative shadow-[-10px_0_30px_rgba(0,0,0,0.5)] hidden xl:flex">
-            <div className="p-4 border-b border-white/5 flex items-center justify-between shrink-0">
-              <h3 className="font-bold text-lg text-white">Up Next</h3>
-              <button onClick={() => setShowQueue(false)} className="text-gray-400 hover:text-white transition-colors">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-              {queue.map((track, idx) => (
-                <ListTrackRow 
-                  key={`${track.id}-${idx}`} 
-                  track={track} 
-                  index={idx === queueIndex ? undefined : idx + 1}
-                  isActive={idx === queueIndex}
-                  context={queue} 
-                  onPlay={() => playTrack(track, queue, idx)}
-                  action={
-                    <button onClick={(e) => { e.stopPropagation(); removeFromQueue(idx); }} className="p-2 hover:bg-red-500/20 hover:text-red-400 rounded-full text-gray-500 transition-colors">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  }
-                />
-              ))}
-            </div>
+        {/* Sync Prompt Overlay for Autoplay Blocked on Refresh/Join */}
+        {roomIsPlaying && localPlayerState !== 1 && localPlayerState !== 3 && localPlayerState !== -10 && (
+          <div 
+            className="absolute top-24 left-1/2 -translate-x-1/2 z-[80] bg-blue-600/95 backdrop-blur-md text-white px-6 py-3 rounded-full shadow-[0_10px_40px_rgba(37,99,235,0.5)] flex items-center gap-3 animate-in slide-in-from-top-4 cursor-pointer border border-blue-400 hover:scale-105 transition-transform" 
+            onClick={() => { 
+                if (player) {
+                    player.playVideo();
+                    setLocalPlayerState(3); // Buffering visual state immediately
+                }
+            }}
+          >
+              <div className="relative flex h-3 w-3 mr-1">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-white"></span>
+              </div>
+              <span className="font-bold text-sm tracking-wide">Tap to Sync Audio</span>
           </div>
+        )}
+
+        {showQueue && (
+          <>
+            {/* Mobile Backdrop */}
+            <div 
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[90] xl:hidden transition-opacity" 
+              onClick={() => setShowQueue(false)} 
+            />
+            
+            {/* Sidebar container */}
+            <div className="fixed inset-y-0 right-0 w-[85%] max-w-[360px] bg-[#0a0f1a] border-l border-white/5 flex flex-col z-[100] xl:static xl:w-80 xl:z-40 shadow-[0_0_50px_rgba(0,0,0,0.8)] xl:shadow-[-10px_0_30px_rgba(0,0,0,0.5)] animate-in slide-in-from-right xl:animate-none duration-300">
+              <div className="p-4 pt-6 md:pt-4 border-b border-white/5 flex items-center justify-between shrink-0 bg-[#0a0f1a] sticky top-0 z-10">
+                <h3 className="font-bold text-lg text-white">Up Next</h3>
+                <button onClick={() => setShowQueue(false)} className="p-2 -mr-2 text-gray-400 hover:text-white transition-colors bg-white/5 rounded-full xl:bg-transparent xl:p-0 xl:mr-0">
+                  <X className="w-5 h-5 xl:w-6 xl:h-6" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-2 pb-24 xl:pb-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+                {queue.map((track, idx) => (
+                  <ListTrackRow 
+                    key={`${track.id}-${idx}`} 
+                    track={track} 
+                    index={idx === queueIndex ? undefined : idx + 1}
+                    isActive={idx === queueIndex}
+                    context={queue} 
+                    onPlay={() => playTrack(track, queue, idx)}
+                    action={
+                      <button onClick={(e) => { e.stopPropagation(); removeFromQueue(idx); }} className="p-2 hover:bg-red-500/20 hover:text-red-400 rounded-full text-gray-500 transition-colors">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+          </>
         )}
       </div>
 
@@ -571,6 +633,7 @@ function SynQPlayApp({ accessToken, userProfile, onLogout }) {
           userProfile={userProfile} partyMembers={partyMembers} hostId={hostId}
           currentTrack={currentTrack} queue={queue} queueIndex={queueIndex}
           isPlaying={isPlaying} progress={progress}
+          socketStatus={socketStatus}
         />
       )}
     </div>
@@ -600,43 +663,24 @@ function BottomNav({ activeTab, setActiveTab }) {
   );
 }
 
-function PartyModal({ onClose, sessionId, onLeave, setSessionId, userProfile, partyMembers, hostId, currentTrack, queue, queueIndex, isPlaying, progress }) {
+function PartyModal({ onClose, sessionId, onLeave, setSessionId, userProfile, partyMembers, hostId, currentTrack, queue, queueIndex, isPlaying, progress, socketStatus }) {
   const [joinId, setJoinId] = useState('');
   const [error, setError] = useState('');
   const userId = userProfile.id || userProfile.email;
 
-  const createParty = async () => {
+  const createParty = () => {
     if (!userProfile) return setError("User profile missing.");
     const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
-    try {
-      await fetch('/api/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: newId, hostId: userId,
-          members: [{ id: userId, name: userProfile.name, picture: userProfile.picture }],
-          queue, queueIndex, currentTrack, isPlaying, progress, updatedBy: userId
-        })
-      });
-      setSessionId(newId);
-    } catch (e) { setError("Failed to create session."); }
+    
+    // We instantly set the sessionId, which triggers the useEffect connecting the socket
+    setSessionId(newId);
   };
 
-  const joinParty = async () => {
+  const joinParty = () => {
     if (!joinId.trim()) return;
     const cleanId = joinId.trim().toUpperCase();
-    try {
-      const res = await fetch(`/api/session?id=${cleanId}`);
-      if (res.ok) {
-        await fetch('/api/session', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'join', sessionId: cleanId, userProfile: { id: userId, name: userProfile.name, picture: userProfile.picture } })
-        });
-        setSessionId(cleanId);
-        onClose();
-      } else setError("Party not found.");
-    } catch (e) { setError("Network error."); }
+    setSessionId(cleanId);
+    onClose();
   };
 
   return (
@@ -646,9 +690,29 @@ function PartyModal({ onClose, sessionId, onLeave, setSessionId, userProfile, pa
         <div className="flex flex-col items-center mb-6">
           <div className="w-14 h-14 bg-blue-600/20 rounded-full flex items-center justify-center mb-4"><Users className="w-7 h-7 text-blue-400" /></div>
           <h2 className="text-2xl font-bold text-white text-center">Listen Together</h2>
-          <p className="text-xs text-gray-400 text-center mt-2 leading-relaxed px-4">Sync playback and queue across multiple devices in real-time.</p>
+          <p className="text-xs text-gray-400 text-center mt-2 leading-relaxed px-4">Instant WebSocket syncing across multiple devices.</p>
+          
+          {/* Live Socket Status Indicator */}
+          {sessionId && (
+            <div className="flex items-center justify-center space-x-2 mt-4 bg-[#0a0f1a] px-4 py-1.5 rounded-full border border-white/5">
+              <div className={`w-2 h-2 rounded-full ${socketStatus === 'connected' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.8)]' : socketStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]'}`}></div>
+              <span className="text-[10px] font-bold uppercase tracking-widest text-gray-300">
+                {socketStatus === 'connected' ? 'Server Connected' : socketStatus === 'connecting' ? 'Connecting...' : 'Server Offline'}
+              </span>
+            </div>
+          )}
         </div>
+        
         {error && <div className="bg-red-500/10 border border-red-500/20 text-red-400 text-xs p-3 rounded-lg mb-4 text-center">{error}</div>}
+        
+        {/* Socket Server Offline Warning */}
+        {sessionId && socketStatus === 'error' && (
+          <div className="bg-red-500/10 border border-red-500/20 text-red-400 text-xs p-3 rounded-lg mb-4 text-center flex flex-col gap-1">
+            <span className="font-bold flex items-center justify-center gap-1"><AlertCircle className="w-3 h-3"/> Connection Failed</span>
+            <span>Check if your standalone server at <code className="bg-black/30 px-1 py-0.5 rounded">{SOCKET_URL || 'localhost'}</code> is running.</span>
+          </div>
+        )}
+
         {sessionId ? (
           <div className="space-y-6">
             <div className="bg-[#0a0f1a] p-5 rounded-xl border border-blue-500/30 text-center">

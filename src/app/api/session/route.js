@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/mongodb';
 import Session from '@/models/Session';
 
+export const dynamic = 'force-dynamic';
+
 // GET: Check if a session exists (used when joining)
 export async function GET(request) {
   await dbConnect();
@@ -23,6 +25,8 @@ export async function POST(request) {
     const data = await request.json();
     const session = await Session.create({
       ...data,
+      // Use 'system' so the creator's frontend doesn't debounce the initial member load
+      updatedBy: 'system', 
       timestamp: Date.now()
     });
     return NextResponse.json({ success: true, session });
@@ -40,7 +44,11 @@ export async function PUT(request) {
     if (action === 'join') {
       await Session.findOneAndUpdate(
         { sessionId },
-        { $addToSet: { members: userProfile } }
+        { 
+          $addToSet: { members: userProfile },
+          // 'system' prevents the frontend from ignoring this critical metadata update
+          $set: { updatedBy: 'system', timestamp: Date.now() }
+        }
       );
       return NextResponse.json({ success: true });
     }
@@ -48,7 +56,11 @@ export async function PUT(request) {
     if (action === 'leave') {
       await Session.findOneAndUpdate(
         { sessionId },
-        { $pull: { members: { id: userProfile.id } } }
+        { 
+          $pull: { members: { id: userProfile.id } },
+          // 'system' prevents the frontend from ignoring this critical metadata update
+          $set: { updatedBy: 'system', timestamp: Date.now() }
+        }
       );
       return NextResponse.json({ success: true });
     }
