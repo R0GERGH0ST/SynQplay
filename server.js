@@ -65,7 +65,7 @@ app.get("/play/:videoId", async (req, res) => {
       return res.status(400).send("Missing videoId");
     }
 
-    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Type", "audio/mp4");;
     res.setHeader("Transfer-Encoding", "chunked");
 
     const stream = await getAudioStream(videoId);

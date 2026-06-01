@@ -51,7 +51,7 @@ function getAudioStream(videoId) {
     return new Promise((resolve, reject) => {
         const process = spawn("bash", [
             "-c",
-            `${YT_DLP_PATH} -f bestaudio --no-playlist -o - https://www.youtube.com/watch?v=${videoId}`
+            `yt-dlp -f bestaudio[ext=m4a]/bestaudio --no-playlist -o - https://www.youtube.com/watch?v=${videoId}`
         ]);
 
         // Timeout protection (Render safe)
