@@ -124,6 +124,7 @@ async function handleExtract(url) {
 
   const youtube = await getYT();
   const info = await youtube.getBasicInfo(videoId);
+  console.log("My Youtube Info", info)
   const player = youtube.session.player;
 
   const allFormats = [];
