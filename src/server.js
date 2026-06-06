@@ -29,9 +29,19 @@ async function getYT() {
     const opts = { client_type: 'MWEB' };
 
     // Cookies fix "Sign in to confirm you're not a bot" on server IPs.
-    // Set YOUTUBE_COOKIES env var with your browser cookies.
-    const cookieStr = process.env.YOUTUBE_COOKIES;
+    // Accepts either:
+    //   - JSON array: [{"name":"...", "value":"..."}, ...]  (from cookie export extensions)
+    //   - Cookie string: NAME1=VALUE1; NAME2=VALUE2; ...
+    let cookieStr = process.env.YOUTUBE_COOKIES;
     if (cookieStr) {
+      cookieStr = cookieStr.trim();
+      // Auto-convert JSON array format
+      if (cookieStr.startsWith('[')) {
+        try {
+          const arr = JSON.parse(cookieStr);
+          cookieStr = arr.map(c => `${c.name}=${c.value}`).join('; ');
+        } catch { /* use as-is */ }
+      }
       opts.cookie = cookieStr;
       console.log('✓ Using YouTube cookies from YOUTUBE_COOKIES env var');
     }
