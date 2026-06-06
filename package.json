@@ -1,0 +1,20 @@
+{
+  "name": "yt-url-extract",
+  "version": "1.0.0",
+  "description": "Simple wrapper service to extract playable media URLs from YouTube",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "youtubei.js": "^17.0.1"
+  },
+  "license": "MIT"
+}
