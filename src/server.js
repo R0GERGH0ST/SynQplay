@@ -26,7 +26,17 @@ let yt = null;
 
 async function getYT() {
   if (!yt) {
-    yt = await Innertube.create({ client_type: 'MWEB' });
+    const opts = { client_type: 'MWEB' };
+
+    // Cookies fix "Sign in to confirm you're not a bot" on server IPs.
+    // Set YOUTUBE_COOKIES env var with your browser cookies.
+    const cookieStr = process.env.YOUTUBE_COOKIES;
+    if (cookieStr) {
+      opts.cookie = cookieStr;
+      console.log('✓ Using YouTube cookies from YOUTUBE_COOKIES env var');
+    }
+
+    yt = await Innertube.create(opts);
   }
   return yt;
 }
@@ -194,8 +204,22 @@ app.get('/api/extract', async (req, res) => {
 });
 
 app.get('/api/health', async (req, res) => {
-  try { await getYT(); res.json({ ok: true }); }
-  catch (err) { res.status(503).json({ ok: false, error: err.message }); }
+  try {
+    await getYT();
+    const hasCookies = !!process.env.YOUTUBE_COOKIES;
+    const result = { ok: true, cookies: hasCookies };
+    if (!hasCookies) {
+      result.warning = 'No cookies set. Will fail on server/data center IPs.';
+      result.fix = [
+        '1. Open YouTube in Chrome, log into a BURNER Google account',
+        '2. Press F12 → Application → Cookies → youtube.com',
+        '3. Copy all cookie values as: NAME1=VALUE1; NAME2=VALUE2; ...',
+        '4. Set YOUTUBE_COOKIES env var in Render dashboard',
+        '5. Redeploy',
+      ];
+    }
+    res.json(result);
+  } catch (err) { res.status(503).json({ ok: false, error: err.message }); }
 });
 
 app.get('/', (req, res) => {
