@@ -35,10 +35,25 @@ router.get('/extract', validateUrl, async (req, res, next) => {
 /**
  * GET /api/health
  *
- * Health check — verifies yt-dlp binary is available.
+ * Health check — verifies yt-dlp binary and cookie config.
  */
 router.get('/health', async (req, res) => {
   const status = await healthCheck();
+
+  if (!status.cookiesConfigured) {
+    status.cookieSetup = {
+      message: 'No cookies configured. Required for server/hosting deployments.',
+      steps: [
+        '1. Install "Get cookies.txt LOCALLY" browser extension',
+        '2. Visit youtube.com logged into a BURNER Google account (not your main one)',
+        '3. Export cookies as cookies.txt using the extension',
+        '4. Base64 encode: [Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.txt"))  (PowerShell) or  base64 -i cookies.txt  (Linux/macOS)',
+        '5. Set COOKIES_BASE64 environment variable in your hosting dashboard (Render → Environment → Add)',
+        '6. Redeploy',
+      ],
+    };
+  }
+
   res.status(status.ok ? 200 : 503).json(status);
 });
 
